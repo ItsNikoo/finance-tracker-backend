@@ -4,6 +4,7 @@ from fastapi import FastAPI
 
 from app.database import Base, engine
 from app.v1.transaction_router import router as transaction_router
+from app.v1.category_router import router as category_router
 
 @asynccontextmanager
 async def lifespan(app: FastAPI):
@@ -22,3 +23,4 @@ def read_root():
 balance = 0
 
 app.include_router(transaction_router)
+app.include_router(category_router)
