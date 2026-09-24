@@ -1,4 +1,7 @@
 import json
+import os
+import time
+import jwt
 import unittest
 from unittest.mock import patch
 from pathlib import Path
@@ -51,7 +54,7 @@ class CategoryTests(unittest.IsolatedAsyncioTestCase):
                 raise
 
     # Выполняет HTTP-запрос через ASGI без внешнего клиента.
-    async def request(self, method, path, data=None):
+    async def request(self, method, path, data=None, headers=None):
         messages = []
         body = json.dumps(data).encode() if data is not None else b""
 
@@ -67,7 +70,7 @@ class CategoryTests(unittest.IsolatedAsyncioTestCase):
             "type": "http", "asgi": {"version": "3.0"}, "http_version": "1.1",
             "method": method, "scheme": "http", "path": path,
             "raw_path": path.encode(), "query_string": b"", "root_path": "",
-            "headers": [(b"content-type", b"application/json")],
+            "headers": [(b"content-type", b"application/json")] + (headers or []),
             "client": ("127.0.0.1", 1234), "server": ("test", 80),
         }
         await main.app(scope, receive, send)
@@ -169,6 +172,62 @@ class CategoryTests(unittest.IsolatedAsyncioTestCase):
             **payload, "email": "bob@example.com",
         })
         self.assertEqual(status, 201)
+
+    # Проверяет выдачу подписанного токена и отказ при неверном пароле.
+    async def test_user_login(self):
+        credentials = {"email": "alice@example.com", "password": "Example-password-123"}
+        status, user = await self.request("POST", "/api/users/create", credentials)
+        self.assertEqual(status, 201)
+        secret = "test-only-secret-key-with-at-least-32-bytes"
+        with patch.dict(os.environ, {"JWT_SECRET_KEY": secret}):
+            status, data = await self.request("POST", "/api/users/login", credentials)
+            self.assertEqual(status, 200)
+            self.assertEqual(set(data), {"access_token", "token_type"})
+            self.assertEqual(data["token_type"], "bearer")
+            claims = jwt.decode(data["access_token"], secret, algorithms=["HS256"])
+            self.assertEqual(set(claims), {"sub", "iat", "exp"})
+            self.assertEqual(claims["sub"], str(user["id"]))
+            self.assertEqual(claims["exp"] - claims["iat"], 1800)
+            self.assertGreater(claims["exp"], time.time())
+            with self.assertRaises(jwt.InvalidSignatureError):
+                jwt.decode(data["access_token"], "different-secret-key-with-at-least-32-bytes", algorithms=["HS256"])
+            for invalid in ({**credentials, "password": "wrong-password"},
+                            {**credentials, "email": "missing@example.com"}):
+                with patch("app.services.user_service.create_access_token") as create_token:
+                    status, error = await self.request("POST", "/api/users/login", invalid)
+                    self.assertEqual(status, 401)
+                    self.assertEqual(error, {"detail": "Неверный email или пароль"})
+                    create_token.assert_not_called()
+
+    # Проверяет доступ к профилю по токену и отказ без аутентификации.
+    async def test_current_user(self):
+        credentials = {"email": "alice@example.com", "password": "Example-password-123"}
+        _, user = await self.request("POST", "/api/users/create", credentials)
+        secret = "test-only-secret-key-with-at-least-32-bytes"
+        with patch.dict(os.environ, {"JWT_SECRET_KEY": secret}):
+            _, login = await self.request("POST", "/api/users/login", credentials)
+            headers = [(b"authorization", ("Bearer " + login["access_token"]).encode())]
+            status, profile = await self.request("GET", "/api/users/me", headers=headers)
+            self.assertEqual((status, profile), (200, user))
+            claims = {"sub": str(user["id"]), "exp": int(time.time()) + 1800}
+            tokens = ["broken", jwt.encode(claims, "other-secret-key-with-at-least-32-bytes", algorithm="HS256")]
+            for changes in ({"exp": 1}, {"sub": "999"}, {"sub": "abc"},
+                            {"sub": "0"}, {"sub": "-1"}, {"sub": "9" * 100},
+                            {"sub": 1}, {"exp": None}):
+                tokens.append(jwt.encode({**claims, **changes}, secret, algorithm="HS256"))
+            for missing in ("sub", "exp"):
+                tokens.append(jwt.encode({k: v for k, v in claims.items() if k != missing}, secret, algorithm="HS256"))
+            invalid_headers = [[], [(b"authorization", b"Basic abc")]]
+            invalid_headers.extend([[(b"authorization", ("Bearer " + token).encode())] for token in tokens])
+            for invalid in invalid_headers:
+                status, error = await self.request("GET", "/api/users/me", headers=invalid)
+                self.assertEqual(status, 401)
+                self.assertEqual(error, {"detail": "Не удалось подтвердить пользователя"})
+            with self.sessions() as db:
+                db.delete(db.get(User, user["id"]))
+                db.commit()
+            status, _ = await self.request("GET", "/api/users/me", headers=headers)
+            self.assertEqual(status, 401)
 
     # Проверяет ограничения БД при обходе API.
     async def test_database_constraints(self):

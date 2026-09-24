@@ -1,4 +1,6 @@
 alembic==1.20.0
+PyJWT==2.15.0
+python-dotenv==1.2.3
 pwdlib[argon2]==0.3.1
 argon2-cffi==25.1.0
 argon2-cffi-bindings==26.1.0
