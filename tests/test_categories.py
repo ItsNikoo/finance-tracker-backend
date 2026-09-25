@@ -1,4 +1,5 @@
 import json
+from functools import partial
 import os
 import time
 import jwt
@@ -107,6 +108,15 @@ class CategoryTests(unittest.IsolatedAsyncioTestCase):
 
     # Проверяет связь транзакции с категорией и совпадение типов.
     async def test_transactions(self):
+        credentials = {"email": "owner@example.com", "password": "Example-password-123"}
+        await self.request("POST", "/api/users/create", credentials)
+        environment = patch.dict(os.environ, {"JWT_SECRET_KEY": "test-only-secret-key-with-at-least-32-bytes"})
+        environment.start()
+        self.addCleanup(environment.stop)
+        _, login = await self.request("POST", "/api/users/login", credentials)
+        self.request = partial(self.request, headers=[
+            (b"authorization", ("Bearer " + login["access_token"]).encode()),
+        ])
         for kind in ("income", "expense"):
             _, category = await self.request("POST", "/api/categories", {
                 "name_en": "Other", "name_ru": "Прочее", "type": kind,
@@ -125,6 +135,37 @@ class CategoryTests(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(status, 422)
         status, _ = await self.request("POST", "/api/transactions", {**data, "category_id": 999})
         self.assertEqual(status, 404)
+
+    # Проверяет изоляцию транзакций двух пользователей.
+    async def test_transaction_ownership(self):
+        _, category = await self.request("POST", "/api/categories", {
+            "name_en": "Salary", "name_ru": "Зарплата", "type": "income",
+        })
+        data = {"type": "income", "amount": "10", "category_id": category["id"]}
+        for method, path, body in (("GET", "/api/transactions", None),
+                                   ("GET", "/api/transactions/1", None),
+                                   ("POST", "/api/transactions", data)):
+            status, _ = await self.request(method, path, body)
+            self.assertEqual(status, 401)
+        with patch.dict(os.environ, {"JWT_SECRET_KEY": "test-only-secret-key-with-at-least-32-bytes"}):
+            users = []
+            for email in ("alice@example.com", "bob@example.com"):
+                credentials = {"email": email, "password": "Example-password-123"}
+                _, user = await self.request("POST", "/api/users/create", credentials)
+                _, login = await self.request("POST", "/api/users/login", credentials)
+                users.append((user["id"], [(b"authorization", ("Bearer " + login["access_token"]).encode())]))
+            status, transaction = await self.request("POST", "/api/transactions", {
+                **data, "user_id": users[1][0],
+            }, headers=users[0][1])
+            self.assertEqual(status, 200)
+            with self.sessions() as db:
+                from app.models.transaction import Transaction
+                self.assertEqual(db.get(Transaction, transaction["id"]).user_id, users[0][0])
+            self.assertEqual(await self.request("GET", "/api/transactions", headers=users[1][1]), (200, []))
+            status, _ = await self.request("GET", f'/api/transactions/{transaction["id"]}', headers=users[1][1])
+            self.assertEqual(status, 404)
+            status, records = await self.request("GET", "/api/transactions", headers=users[0][1])
+            self.assertEqual((status, len(records)), (200, 1))
 
     # Проверяет регистрацию, хеширование и публичный ответ.
     async def test_user_creation(self):

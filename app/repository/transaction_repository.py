@@ -15,15 +15,19 @@ class TransactionRepository:
 
         return transaction
 
-    def get_list(self) -> list[Transaction]:
-        statement = select(Transaction)
+    def get_list(self, user_id: int) -> list[Transaction]:
+        statement = select(Transaction).where(Transaction.user_id == user_id)
 
         transactions = self.db.execute(statement)
 
         return list(transactions.scalars().all())
 
-    def get_by_id(self, transaction_id: int) -> Transaction | None:
-        statement = select(Transaction).where(Transaction.id == transaction_id)
+    # Ищет транзакцию только среди записей указанного пользователя.
+    def get_by_id(self, transaction_id: int, user_id: int) -> Transaction | None:
+        statement = select(Transaction).where(
+            Transaction.id == transaction_id,
+            Transaction.user_id == user_id,
+        )
 
         transaction = self.db.execute(statement)
 

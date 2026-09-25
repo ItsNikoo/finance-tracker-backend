@@ -21,6 +21,9 @@ class Transaction(Base):
     category_id: Mapped[int] = mapped_column(
         ForeignKey("categories.id"), nullable=False, index=True,
     )
+    user_id: Mapped[int] = mapped_column(
+        ForeignKey("users.id", name="fk_transactions_user_id_users"), nullable=False, index=True,
+    )
     type: Mapped[TransactionType] = mapped_column(
         SqlEnum(TransactionType),
         nullable=False,
