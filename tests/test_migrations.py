@@ -47,7 +47,7 @@ class MigrationTests(unittest.TestCase):
                 command.upgrade(config, "head")
                 self.assertEqual(
                     set(inspect(connection).get_table_names()),
-                    {"categories", "transactions", "users", "alembic_version"},
+                    {"categories", "transactions", "users", "user_sessions", "alembic_version"},
                 )
                 command.check(config)
                 command.downgrade(config, "base")

@@ -1,14 +1,13 @@
 from datetime import datetime, timedelta, timezone
+import hashlib
 import os
-from pathlib import Path
+import secrets
 
 import jwt
-from dotenv import load_dotenv
 from pwdlib import PasswordHash
 
+from app.settings import ACCESS_TOKEN_SECONDS
 
-# Загружает настройки из .env в корне проекта.
-load_dotenv(Path(__file__).resolve().parents[1] / ".env")
 
 password_hasher = PasswordHash.recommended()
 
@@ -26,30 +25,59 @@ def get_jwt_secret() -> str:
     return secret
 
 
-# Создаёт подписанный токен доступа на 30 минут.
-def create_access_token(user_id: int) -> str:
-    secret = get_jwt_secret()
+# Возвращает UTC без часового пояса для хранения в SQLite.
+def utc_now() -> datetime:
+    return datetime.now(timezone.utc).replace(tzinfo=None)
+
+
+# Создаёт access-токен, связанный с серверной сессией.
+def create_access_token(user_id: int, session_id: str) -> str:
     now = datetime.now(timezone.utc)
-    payload = {
-        "sub": str(user_id),
-        "iat": now,
-        "exp": now + timedelta(minutes=30),
-    }
-    return jwt.encode(payload, secret, algorithm="HS256")
+    return jwt.encode({
+        "sub": str(user_id), "sid": session_id, "kind": "access",
+        "iat": now, "exp": now + timedelta(seconds=ACCESS_TOKEN_SECONDS),
+    }, get_jwt_secret(), algorithm="HS256")
 
 
-# Проверяет токен и возвращает идентификатор пользователя.
-def decode_access_token(token: str) -> int:
-    payload = jwt.decode(
-        token, get_jwt_secret(), algorithms=["HS256"],
-        options={"require": ["sub", "exp"]},
-    )
+# Проверяет подпись, срок действия и назначение access-токена.
+def decode_access_token(token: str) -> tuple[int, str]:
+    payload = jwt.decode(token, get_jwt_secret(), algorithms=["HS256"],
+                         options={"require": ["sub", "sid", "exp", "kind"]})
     subject = payload["sub"]
-    if not isinstance(subject, str) or not subject.isascii() or not subject.isdecimal():
-        raise jwt.InvalidTokenError("Некорректный идентификатор пользователя")
-    if len(subject) > 19:
-        raise jwt.InvalidTokenError("Некорректный идентификатор пользователя")
+    session_id = payload["sid"]
+    if (payload["kind"] != "access" or not isinstance(subject, str)
+            or not subject.isascii() or not subject.isdecimal() or len(subject) > 19
+            or not isinstance(session_id, str) or len(session_id) != 32):
+        raise jwt.InvalidTokenError("Некорректный токен доступа")
     user_id = int(subject)
     if not 0 < user_id <= 9223372036854775807:
         raise jwt.InvalidTokenError("Некорректный идентификатор пользователя")
-    return user_id
+    return user_id, session_id
+
+
+# Создаёт случайный refresh-токен с идентификатором сессии.
+def create_refresh_token(session_id: str) -> str:
+    return session_id + "." + secrets.token_urlsafe(32)
+
+
+# Хеширует случайный токен перед сохранением в БД.
+def hash_token(token: str) -> str:
+    return hashlib.sha256(token.encode()).hexdigest()
+
+
+# Создаёт подписанный CSRF-токен для сессии или формы входа.
+def create_csrf_token(session_id: str, lifetime: int) -> str:
+    now = datetime.now(timezone.utc)
+    return jwt.encode({
+        "sid": session_id, "kind": "csrf", "nonce": secrets.token_urlsafe(32),
+        "iat": now, "exp": now + timedelta(seconds=lifetime),
+    }, get_jwt_secret(), algorithm="HS256")
+
+
+# Проверяет CSRF-токен и возвращает его привязку к сессии.
+def decode_csrf_token(token: str) -> str:
+    payload = jwt.decode(token, get_jwt_secret(), algorithms=["HS256"],
+                         options={"require": ["sid", "kind", "nonce", "exp"]})
+    if payload["kind"] != "csrf" or not isinstance(payload["sid"], str):
+        raise jwt.InvalidTokenError("Некорректный CSRF-токен")
+    return payload["sid"]

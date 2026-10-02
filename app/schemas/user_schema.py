@@ -1,5 +1,4 @@
 from datetime import datetime
-from typing import Literal
 
 from pydantic import BaseModel, ConfigDict, EmailStr, Field, field_validator
 
@@ -36,7 +35,11 @@ class UserLogin(BaseModel):
         return value.lower()
 
 
-# Описывает токен доступа в ответе на успешный вход.
-class TokenRead(BaseModel):
-    access_token: str
-    token_type: Literal["bearer"] = "bearer"
+# Возвращает CSRF-токен для последующих запросов клиента.
+class CsrfRead(BaseModel):
+    csrf_token: str
+
+
+# Возвращает профиль и CSRF-токен после входа или обновления сессии.
+class AuthRead(CsrfRead):
+    user: UserRead

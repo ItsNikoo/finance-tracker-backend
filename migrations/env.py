@@ -6,6 +6,7 @@ from app.database import Base, DATABASE_URL, engine
 from app.models.category import Category
 from app.models.transaction import Transaction
 from app.models.user import User
+from app.models.user_session import UserSession
 
 config = context.config
 if config.config_file_name is not None:
