@@ -2,6 +2,8 @@ from fastapi import Depends, APIRouter, HTTPException
 from sqlalchemy.orm import Session
 
 from app.database import get_db
+from app.dependencies.auth import get_current_user
+from app.models.user import User
 from app.repository.transaction_repository import TransactionRepository
 from app.repository.category_repository import CategoryRepository
 from app.schemas.transaction_schema import TransactionCreate, TransactionRead
@@ -22,24 +24,27 @@ router = APIRouter(prefix="/transactions", tags=["transactions"])
 # Возвращает список транзакций с категориями.
 @router.get("", response_model=list[TransactionRead])
 def get_transactions(
+        current_user: User = Depends(get_current_user),
         service: TransactionService = Depends(get_transaction_service)
 ):
-    return service.get_transactions()
+    return service.get_transactions(current_user.id)
 
 
 # Возвращает транзакцию по идентификатору.
 @router.get("/{transaction_id}", response_model=TransactionRead)
 def get_transaction_by_id(
         transaction_id: int,
+        current_user: User = Depends(get_current_user),
         service: TransactionService = Depends(get_transaction_service)
 ):
-    return service.get_transaction(transaction_id)
+    return service.get_transaction(transaction_id, current_user.id)
 
 
 # Создаёт транзакцию с выбранной категорией.
 @router.post("", response_model=TransactionRead)
 def create_transaction(
         data: TransactionCreate,
+        current_user: User = Depends(get_current_user),
         service: TransactionService = Depends(get_transaction_service)
 ):
-    return service.create_transaction(data)
+    return service.create_transaction(data, current_user.id)

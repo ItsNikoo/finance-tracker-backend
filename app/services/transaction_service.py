@@ -14,7 +14,7 @@ class TransactionService:
         self.category_repository = category_repository
 
     # Проверяет категорию и сохраняет транзакцию.
-    def create_transaction(self, data: TransactionCreate) -> Transaction:
+    def create_transaction(self, data: TransactionCreate, user_id: int) -> Transaction:
         # тут проверки и бизнес-логика
         if data.amount <= 0:
             raise HTTPException(
@@ -29,6 +29,7 @@ class TransactionService:
             raise HTTPException(status_code=400, detail="Тип категории не совпадает с типом транзакции")
 
         transaction = Transaction(
+            user_id=user_id,
             category_id=data.category_id,
             type=data.type,
             amount=data.amount
@@ -36,13 +37,13 @@ class TransactionService:
 
         return self.repository.create(transaction)
 
-    # Возвращает список транзакций.
-    def get_transactions(self) -> list[Transaction]:
-        return self.repository.get_list()
+    # Возвращает список транзакций текущего пользователя.
+    def get_transactions(self, user_id: int) -> list[Transaction]:
+        return self.repository.get_list(user_id)
 
     # Возвращает транзакцию или ошибку отсутствия.
-    def get_transaction(self, transaction_id: int) -> Transaction:
-        transaction = self.repository.get_by_id(transaction_id)
+    def get_transaction(self, transaction_id: int, user_id: int) -> Transaction:
+        transaction = self.repository.get_by_id(transaction_id, user_id)
 
         if transaction is None:
             raise HTTPException(
