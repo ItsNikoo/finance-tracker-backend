@@ -1,9 +1,13 @@
+from datetime import datetime
+from decimal import Decimal
+
 from fastapi import HTTPException
 
 from app.models.transaction import Transaction
 from app.repository.transaction_repository import TransactionRepository
 from app.repository.category_repository import CategoryRepository
-from app.schemas.transaction_schema import TransactionCreate
+from app.schemas.transaction_schema import TransactionCreate, TransactionDateUpdate
+from app.transaction_time import moscow_now
 
 
 # Проверяет правила создания и получения транзакций.
@@ -32,7 +36,10 @@ class TransactionService:
             user_id=user_id,
             category_id=data.category_id,
             type=data.type,
-            amount=data.amount
+            amount=data.amount,
+            payment_method=data.payment_method,
+            description=data.description,
+            occurred_at=data.occurred_at.replace(tzinfo=None),
         )
 
         return self.repository.create(transaction)
@@ -52,3 +59,49 @@ class TransactionService:
             )
 
         return transaction
+
+    # Изменяет дату только у транзакции текущего пользователя.
+    def update_transaction_date(
+        self, transaction_id: int, data: TransactionDateUpdate, user_id: int,
+    ) -> Transaction:
+        transaction = self.get_transaction(transaction_id, user_id)
+        transaction.occurred_at = data.occurred_at.replace(tzinfo=None)
+        return self.repository.save(transaction)
+
+    # Служебная функция. Устанавливает время для выбранного месяца и года.
+    def set_time(self, month: int | None, year: int | None):
+        now = moscow_now()
+        selected_month = now.month if month is None else month
+        selected_year = now.year if year is None else year
+        start = datetime(selected_year, selected_month, 1)
+        if selected_month == 12:
+            end = datetime(selected_year + 1, 1, 1)
+        else:
+            end = datetime(selected_year, selected_month + 1, 1)
+        return start, end
+
+    # Возвращает месячный баланс по транзакциям текущего пользователя.
+    def get_monthly_balance(self,
+                            user_id: int,
+                            month: int | None = None,
+                            year: int | None = None) -> Decimal:
+        start, end = self.set_time(month, year)
+
+        return self.repository.get_balance(user_id, start, end)
+
+    # Возвращает месячный доход по транзакциям текущего пользователя.
+    def get_monthly_income(self,
+                            user_id: int,
+                            month: int | None = None,
+                            year: int | None = None) -> Decimal:
+        start, end = self.set_time(month, year)
+
+        return self.repository.get_income(user_id, start, end)
+
+    def get_monthly_expense(self,
+                            user_id: int,
+                            month: int | None = None,
+                            year: int | None = None) -> Decimal:
+        start, end = self.set_time(month, year)
+
+        return self.repository.get_expences(user_id, start, end)

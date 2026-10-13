@@ -4,11 +4,22 @@ import unittest
 
 from fastapi.testclient import TestClient
 
-from app.docs import CSRF_INTERCEPTOR
+from app.docs import CSRF_INTERCEPTOR, AUTH_CLIENT, AUTH_DIALOG_SCRIPT
 from main import app
 
 
 class SwaggerDocsTests(unittest.TestCase):
+    def test_openapi_describes_cookie_authentication(self):
+        with TestClient(app) as client:
+            schema = client.get("/openapi.json").json()
+        scheme = schema["components"]["securitySchemes"]["SessionCookie"]
+        self.assertEqual(scheme["type"], "apiKey")
+        self.assertEqual(scheme["in"], "cookie")
+        self.assertEqual(scheme["name"], "access_token")
+        for path in ("/api/users/me", "/api/transactions", "/api/transactions/balance"):
+            self.assertEqual(schema["paths"][path]["get"]["security"], [{"SessionCookie": []}])
+        self.assertNotIn("security", schema["paths"]["/api/users/login"]["post"])
+
     def test_docs_configures_cookie_and_csrf_requests(self):
         with TestClient(app) as client:
             response = client.get("/docs")
@@ -17,12 +28,96 @@ class SwaggerDocsTests(unittest.TestCase):
             self.assertIn("requestInterceptor: swaggerCsrfInterceptor", response.text)
             self.assertIn('const csrfUrl = "/api/users/csrf";', response.text)
             self.assertEqual(response.headers["Cache-Control"], "no-store")
+            self.assertIn('id="swagger-login-form"', response.text)
+            self.assertIn('type="password"', response.text)
+            self.assertIn('"login": "/api/users/login"', response.text)
 
     def test_docs_supports_proxy_prefix(self):
         with TestClient(app, root_path="/finance") as client:
             response = client.get("/docs")
             self.assertIn('const csrfUrl = "/finance/api/users/csrf";', response.text)
             self.assertIn("url: '/finance/openapi.json'", response.text)
+            self.assertIn('"login": "/finance/api/users/login"', response.text)
+            self.assertIn('"logout": "/finance/api/users/logout"', response.text)
+            self.assertIn('"me": "/finance/api/users/me"', response.text)
+
+    @unittest.skipUnless(shutil.which("node"), "Node.js is needed for the Swagger login test")
+    def test_authorize_form_logs_in_and_out_with_csrf(self):
+        script = """
+const assert = require("node:assert/strict");
+const window = {location: {href: "http://127.0.0.1:8000/docs", origin: "http://127.0.0.1:8000"}};
+const csrfUrl = "/api/users/csrf";
+const authUrls = {login: "/api/users/login", logout: "/api/users/logout", me: "/api/users/me"};
+const elements = {};
+const document = {
+    handlers: {},
+    getElementById(id) {
+        return elements[id] ??= {value: "", hidden: false, disabled: false, textContent: "", open: false,
+            handlers: {}, addEventListener(type, handler) {this.handlers[type] = handler;},
+            reset() {elements["swagger-email"].value = ""; elements["swagger-password"].value = "";},
+            showModal() {this.open = true;},
+            close() {this.open = false; this.handlers.close();}};
+    },
+    addEventListener(type, handler, capture) {assert.equal(capture, true); this.handlers[type] = handler;}
+};
+let loggedIn = false;
+let rejectLogin = false;
+let csrfCalls = 0;
+const fetch = async (url, options) => {
+    assert.equal(options.credentials, "include");
+    assert.equal(options.cache, "no-store");
+    if (url === authUrls.me) return {ok: loggedIn, status: loggedIn ? 200 : 401,
+        json: async () => ({email: "alice@example.com"})};
+    if (url === csrfUrl) {
+        csrfCalls++;
+        return {ok: true, json: async () => ({csrf_token: `csrf-${csrfCalls}`})};
+    }
+    assert.equal(options.method, "POST");
+    assert.equal(options.headers["X-CSRF-Token"], `csrf-${csrfCalls}`);
+    if (url === authUrls.login) {
+        assert.deepEqual(JSON.parse(options.body), {email: "alice@example.com", password: "test-password"});
+        loggedIn = !rejectLogin;
+        return {ok: !rejectLogin, status: rejectLogin ? 401 : 200,
+            json: async () => rejectLogin ? {detail: "Неверный email или пароль"}
+                : {user: {email: "alice@example.com"}, csrf_token: "new-session-token"}};
+    }
+    assert.equal(url, authUrls.logout);
+    loggedIn = false;
+    return {ok: true, status: 204};
+};
+""" + CSRF_INTERCEPTOR + AUTH_CLIENT + AUTH_DIALOG_SCRIPT + """
+(async () => {
+    let intercepted = false;
+    await document.handlers.click({target: {closest: () => true}, preventDefault() {},
+        stopImmediatePropagation() {intercepted = true;}});
+    assert.equal(intercepted, true);
+    assert.equal(elements["swagger-login"].open, true);
+    assert.equal(elements["swagger-login-form"].hidden, false);
+    for (const reject of [true, false]) {
+        rejectLogin = reject;
+        elements["swagger-email"].value = "alice@example.com";
+        elements["swagger-password"].value = "test-password";
+        await elements["swagger-login-form"].handlers.submit({preventDefault() {}});
+        assert.equal(elements["swagger-password"].value, "");
+        assert.equal(elements["swagger-login-submit"].disabled, false);
+        assert.equal(elements["swagger-login-form"].hidden, !reject);
+        if (reject) assert.match(elements["swagger-auth-error"].textContent, /Неверный email/);
+    }
+    assert.match(elements["swagger-auth-status"].textContent, /alice@example.com/);
+    assert.equal(elements["swagger-logout"].hidden, false);
+    await elements["swagger-logout"].handlers.click();
+    assert.equal(loggedIn, false);
+    assert.equal(elements["swagger-login-form"].hidden, false);
+    assert.equal(csrfCalls, 3);
+    elements["swagger-password"].value = "discard-on-close";
+    elements["swagger-auth-close"].handlers.click();
+    assert.equal(elements["swagger-password"].value, "");
+    assert.equal(elements["swagger-login"].open, false);
+})().catch(error => {console.error(error); process.exitCode = 1;});
+"""
+        result = subprocess.run([shutil.which("node"), "-e", script],
+                                capture_output=True, text=True, timeout=15)
+        self.assertEqual(result.returncode, 0, result.stderr)
 
     @unittest.skipUnless(shutil.which("node"), "Node.js is needed for the Swagger interceptor test")
     def test_interceptor_refreshes_tokens_and_propagates_errors(self):

@@ -1,6 +1,7 @@
 import os
 import unittest
-from datetime import timedelta
+from datetime import datetime, timedelta
+from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
@@ -17,10 +18,11 @@ import main
 from app.database import enable_foreign_keys, get_db
 from app.models.user import User
 from app.models.user_session import UserSession
-from app.models.transaction import Transaction
+from app.models.transaction import Transaction, TransactionType, PaymentMethod
 from app.repository.user_repository import UserRepository
 from app.repository.session_repository import SessionRepository
 from app.security import hash_token, password_hasher, utc_now
+from app.transaction_time import MOSCOW_TZ, moscow_now
 
 
 # Проверяет API с cookies и отдельной базой данных.
@@ -85,6 +87,28 @@ class ApiTests(unittest.TestCase):
         response = self.post("/api/categories", {"name_en": "Other", "name_ru": "Прочее", "type": kind})
         self.assertEqual(response.status_code, 201)
         return response.json()
+
+    # Проверяет публичный профиль и хеш пароля.
+    def test_swagger_login_from_loopback_origin(self):
+        with patch.dict(os.environ, {
+            "COOKIE_SECURE": "false",
+            "ALLOWED_ORIGINS": "http://localhost:8000,http://127.0.0.1:8000",
+        }):
+            with TestClient(main.app, base_url="http://127.0.0.1:8000", headers={
+                "Origin": "http://127.0.0.1:8000",
+            }) as client:
+                credentials = {"email": "docs@example.com", "password": "Example-password-123"}
+                self.assertEqual(self.post("/api/users/register", credentials, client).status_code, 201)
+                self.assertEqual(self.post("/api/users/login", credentials, client).status_code, 200)
+                self.assertEqual(client.get("/api/users/me").json()["email"], credentials["email"])
+                self.assertEqual(client.get("/api/transactions/balance").status_code, 200)
+                csrf = client.get("/api/users/csrf").json()["csrf_token"]
+                self.assertEqual(client.post("/api/users/logout", headers={
+                    "X-CSRF-Token": csrf, "Origin": "http://evil.example",
+                }).status_code, 403)
+                self.assertEqual(client.post("/api/users/logout").status_code, 403)
+                self.assertEqual(self.post("/api/users/logout", client=client).status_code, 204)
+                self.assertEqual(client.get("/api/users/me").status_code, 401)
 
     # Проверяет публичный профиль и хеш пароля.
     def test_registration_and_password(self):
@@ -291,7 +315,7 @@ class ApiTests(unittest.TestCase):
     # Проверяет создание транзакций и изоляцию двух пользователей.
     def test_transactions(self):
         category = self.category()
-        data = {"type": "income", "amount": "12.34", "category_id": category["id"]}
+        data = {"type": "income", "amount": "12.34", "category_id": category["id"], "payment_method": "cash"}
         self.assertEqual(self.client.get("/api/transactions").status_code, 401)
         self.assertEqual(self.post("/api/transactions", data).status_code, 401)
         first = self.login().json()["user"]
@@ -310,6 +334,138 @@ class ApiTests(unittest.TestCase):
             self.login("bob@example.com", other)
             self.assertEqual(other.get("/api/transactions").json(), [])
             self.assertEqual(other.get(f"/api/transactions/{identifier}").status_code, 404)
+        finally:
+            other.close()
+
+    # Проверяет текущий месяц, границы года, знак баланса и изоляцию пользователей.
+    def test_monthly_balance(self):
+        path = "/api/transactions/balance"
+        self.assertEqual(self.client.get(path).status_code, 401)
+        credentials = {"email": "alice@example.com", "password": "Example-password-123"}
+        registered = self.post("/api/users/register", credentials)
+        self.assertEqual(registered.status_code, 201)
+        logged_in = self.post("/api/users/login", credentials)
+        self.assertEqual(logged_in.status_code, 200)
+        user_id = logged_in.json()["user"]["id"]
+        income_category = self.category("income")["id"]
+        expense_category = self.category("expense")["id"]
+        with patch("app.services.transaction_service.moscow_now") as clock:
+            clock.return_value = datetime(2026, 12, 15, 12, tzinfo=MOSCOW_TZ)
+            response = self.client.get(path)
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json(), 0)
+
+            with self.sessions() as db:
+                other = User(email="other@example.com", hashed_password="test-only")
+                db.add(other)
+                db.flush()
+                expense = Transaction(
+                    payment_method=PaymentMethod.CASH,
+                    user_id=user_id, category_id=expense_category,
+                    type=TransactionType.EXPENSE, amount=Decimal("2.10"),
+                    occurred_at=datetime(2026, 12, 31, 23, 59, 59, 999999),
+                    created_at=datetime(2020, 1, 1),
+                )
+                db.add(expense)
+                for owner, date, amount in (
+                    (user_id, datetime(2026, 11, 30, 23, 59, 59, 999999), "1000"),
+                    (user_id, datetime(2026, 12, 1), "12.34"),
+                    (user_id, datetime(2027, 1, 1), "1000"),
+                    (other.id, datetime(2026, 12, 15), "5000"),
+                ):
+                    db.add(Transaction(
+                        payment_method=PaymentMethod.CASH,
+                        user_id=owner, category_id=income_category,
+                        type=TransactionType.INCOME, amount=Decimal(amount), occurred_at=date,
+                        created_at=datetime(2020, 1, 1),
+                    ))
+                db.commit()
+                expense_id = expense.id
+
+            self.assertEqual(self.client.get(path).json(), 10.24)
+            self.assertEqual(self.client.get(path, params={"month": 12}).json(), 10.24)
+            self.assertEqual(self.client.get(path, params={"month": 11}).json(), 1000)
+            self.assertEqual(self.client.get(path, params={"month": 1}).json(), 0)
+            for invalid_month in (0, 13, -1, "bad", "1.5", ""):
+                self.assertEqual(self.client.get(path, params={"month": invalid_month}).status_code, 422)
+            for amount, expected in (("20.00", -7.66), ("12.34", 0)):
+                with self.sessions() as db:
+                    db.get(Transaction, expense_id).amount = Decimal(amount)
+                    db.commit()
+                self.assertEqual(self.client.get(path).json(), expected)
+
+            clock.return_value = datetime(2027, 1, 15, 12, tzinfo=MOSCOW_TZ)
+            self.assertEqual(self.client.get(path).json(), 1000)
+            self.assertEqual(self.client.get(path, params={"month": 12}).json(), 0)
+
+    def test_transaction_occurrence_date(self):
+        credentials = {"email": "alice@example.com", "password": "Example-password-123"}
+        self.assertEqual(self.post("/api/users/register", credentials).status_code, 201)
+        self.assertEqual(self.post("/api/users/login", credentials).status_code, 200)
+        category_id = self.category()["id"]
+        data = {"category_id": category_id, "type": "income", "amount": "10.25", "payment_method": "card", "description": "Покупка"}
+        before = moscow_now()
+        default = self.post("/api/transactions", data)
+        self.assertEqual(default.status_code, 200)
+        self.assertEqual(default.json()["payment_method"], "card")
+        self.assertEqual(default.json()["description"], "Покупка")
+        occurred = datetime.fromisoformat(default.json()["occurred_at"])
+        self.assertEqual(occurred.utcoffset(), timedelta(hours=3))
+        self.assertLessEqual(before, occurred)
+        self.assertLessEqual(occurred, moscow_now())
+        with self.sessions() as db:
+            db.get(Transaction, default.json()["id"]).occurred_at = datetime(2000, 1, 1)
+            db.commit()
+
+        created = self.post("/api/transactions", {
+            **data, "occurred_at": "2026-11-30T21:00:00Z",
+        })
+        self.assertEqual(created.status_code, 200)
+        record = created.json()
+        self.assertEqual(record["occurred_at"], "2026-12-01T00:00:00+03:00")
+        path = f'/api/transactions/{record["id"]}'
+        self.assertEqual(self.client.get(path).json(), record)
+
+        csrf = self.client.get("/api/users/csrf").json()["csrf_token"]
+        headers = {"X-CSRF-Token": csrf}
+        with patch("app.services.transaction_service.moscow_now") as clock:
+            clock.return_value = datetime(2026, 12, 15, tzinfo=MOSCOW_TZ)
+            self.assertEqual(self.client.get("/api/transactions/balance").json(), 10.25)
+            updated = self.client.patch(path, json={"occurred_at": "2026-11-30T23:59:59"}, headers=headers)
+            self.assertEqual(updated.status_code, 200)
+            self.assertEqual(updated.json()["occurred_at"], "2026-11-30T23:59:59+03:00")
+            self.assertEqual(updated.json()["created_at"], record["created_at"])
+            self.assertEqual(updated.json()["amount"], record["amount"])
+            self.assertEqual(self.client.get("/api/transactions/balance").json(), 0)
+        for invalid in ({}, {"occurred_at": None}, {"occurred_at": "bad"},
+                        {"occurred_at": "2026-12-01T00:00:00", "user_id": 999}):
+            self.assertEqual(self.client.patch(path, json=invalid, headers=headers).status_code, 422)
+        for invalid in (None, "bad"):
+            self.assertEqual(self.post("/api/transactions", {**data, "occurred_at": invalid}).status_code, 422)
+        for method in ("cash", "transfer"):
+            response = self.post("/api/transactions", {**data, "payment_method": method, "description": None})
+            self.assertEqual(response.status_code, 200)
+            self.assertEqual(response.json()["payment_method"], method)
+            self.assertIsNone(response.json()["description"])
+        self.assertEqual(self.client.patch("/api/transactions/999", json={
+            "occurred_at": "2026-12-01T00:00:00",
+        }, headers=headers).status_code, 404)
+
+        other = self.new_client()
+        try:
+            date = {"occurred_at": "2026-12-02T12:00:00+03:00"}
+            anonymous_csrf = other.get("/api/users/csrf").json()["csrf_token"]
+            self.assertEqual(other.patch(path, json=date, headers={
+                "X-CSRF-Token": anonymous_csrf,
+            }).status_code, 401)
+            other_credentials = {**credentials, "email": "bob@example.com"}
+            self.assertEqual(self.post("/api/users/register", other_credentials, other).status_code, 201)
+            login = self.post("/api/users/login", other_credentials, other)
+            self.assertEqual(login.status_code, 200)
+            self.assertEqual(other.patch(path, json=date, headers={
+                "X-CSRF-Token": login.json()["csrf_token"],
+            }).status_code, 404)
+            self.assertEqual(self.client.get(path).json(), updated.json())
         finally:
             other.close()
 
