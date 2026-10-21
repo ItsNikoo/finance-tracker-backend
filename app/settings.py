@@ -17,7 +17,7 @@ CSRF_COOKIE = "csrf_token"
 # Возвращает точные адреса доверенных клиентов.
 def get_allowed_origins() -> list[str]:
     origins = [value.strip().rstrip("/") for value in os.getenv(
-        "ALLOWED_ORIGINS", "http://localhost:5173,http://localhost:8000",
+        "ALLOWED_ORIGINS", "http://localhost:5173,http://127.0.0.1:5173,http://localhost:8000,http://127.0.0.1:8000",
     ).split(",") if value.strip()]
     if not origins or "*" in origins or "null" in origins:
         raise RuntimeError("ALLOWED_ORIGINS должен содержать точные адреса клиентов")

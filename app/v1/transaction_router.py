@@ -1,4 +1,4 @@
-from fastapi import Depends, APIRouter, HTTPException
+from fastapi import Depends, APIRouter, Query, Response
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -6,7 +6,7 @@ from app.dependencies.auth import get_current_user
 from app.models.user import User
 from app.repository.transaction_repository import TransactionRepository
 from app.repository.category_repository import CategoryRepository
-from app.schemas.transaction_schema import TransactionCreate, TransactionRead
+from app.schemas.transaction_schema import TransactionCreate, TransactionRead, TransactionUpdate
 from app.services.transaction_service import TransactionService
 
 
@@ -30,6 +30,36 @@ def get_transactions(
     return service.get_transactions(current_user.id)
 
 
+# Возвращает баланс выбранного или текущего месяца по дате совершения в МСК.
+@router.get("/balance", response_model=float)
+def get_monthly_balance(
+        month: int | None = Query(default=None, ge=1, le=12, description="Месяц текущего года по МСК. По умолчанию — текущий месяц."),
+        year: int | None = Query(default=None, ge=2020, le=2100, description="Год по МСК. По умолчанию — текущий год."),
+        current_user: User = Depends(get_current_user),
+        service: TransactionService = Depends(get_transaction_service)
+):
+    return service.get_monthly_balance(current_user.id, month, year)
+
+# Возвращает доход выбранного или текущего месяца по дате совершения в МСК.
+@router.get("/balance/income", response_model=float)
+def get_monthly_income(
+        month: int | None = Query(default=None, ge=1, le=12, description="Месяц текущего года по МСК. По умолчанию — текущий месяц."),
+        year: int | None = Query(default=None, ge=2020, le=2100, description="Год по МСК. По умолчанию — текущий год."),
+        current_user: User = Depends(get_current_user),
+        service: TransactionService = Depends(get_transaction_service)
+):
+    return service.get_monthly_income(current_user.id, month, year)
+
+# Возвращает расходы выбранного или текущего месяца по дате совершения в МСК.
+@router.get("/balance/expenses", response_model=float)
+def get_monthly_expense(
+        month: int | None = Query(default=None, ge=1, le=12, description="Месяц текущего года по МСК. По умолчанию — текущий месяц."),
+        year: int | None = Query(default=None, ge=2020, le=2100, description="Год по МСК. По умолчанию — текущий год."),
+        current_user: User = Depends(get_current_user),
+        service: TransactionService = Depends(get_transaction_service)
+):
+    return service.get_monthly_expense(current_user.id, month, year)
+
 # Возвращает транзакцию по идентификатору.
 @router.get("/{transaction_id}", response_model=TransactionRead)
 def get_transaction_by_id(
@@ -48,3 +78,24 @@ def create_transaction(
         service: TransactionService = Depends(get_transaction_service)
 ):
     return service.create_transaction(data, current_user.id)
+
+
+# Частично обновляет транзакцию текущего пользователя.
+@router.patch("/{transaction_id}", response_model=TransactionRead)
+def update_transaction(
+        transaction_id: int,
+        data: TransactionUpdate,
+        current_user: User = Depends(get_current_user),
+        service: TransactionService = Depends(get_transaction_service)
+):
+    return service.update_transaction(transaction_id, data, current_user.id)
+
+
+@router.delete("/{transaction_id}", status_code=204, response_class=Response)
+def delete_transaction(
+        transaction_id: int,
+        current_user: User = Depends(get_current_user),
+        service: TransactionService = Depends(get_transaction_service)
+):
+    service.delete_transaction(transaction_id, current_user.id)
+    return Response(status_code=204)

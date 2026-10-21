@@ -7,6 +7,7 @@ from app.models.category import Category
 from app.models.transaction import Transaction
 from app.models.user import User
 from app.models.user_session import UserSession
+from app.models.password_reset import PasswordResetToken, PasswordResetRateLimit
 
 config = context.config
 if config.config_file_name is not None:

@@ -2,6 +2,7 @@ import secrets
 
 import jwt
 from fastapi import Depends, HTTPException, Request
+from fastapi.security import APIKeyCookie
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -12,6 +13,14 @@ from app.repository.user_repository import UserRepository
 from app.security import decode_csrf_token
 from app.services.session_service import SessionService
 from app.settings import ACCESS_COOKIE, REFRESH_COOKIE, CSRF_COOKIE, get_allowed_origins
+
+
+access_cookie = APIKeyCookie(
+    name=ACCESS_COOKIE,
+    scheme_name="SessionCookie",
+    auto_error=False,
+    description="В Swagger нажмите Authorize и введите email и пароль. Браузер автоматически отправляет HttpOnly cookie. Также можно войти через POST /api/users/login.",
+)
 
 
 # Собирает сервис сессий для текущего запроса.
@@ -55,10 +64,10 @@ def require_csrf(
 
 # Проверяет access-cookie и возвращает владельца действующей сессии.
 def get_current_user(
-    request: Request,
+    token: str | None = Depends(access_cookie),
     service: SessionService = Depends(get_session_service),
 ) -> User:
-    session = service.from_access(request.cookies.get(ACCESS_COOKIE))
+    session = service.from_access(token)
     if session is None:
         raise HTTPException(401, "Не удалось подтвердить пользователя")
     return service.users.get_user_by_id(session.user_id)
