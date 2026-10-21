@@ -1,5 +1,5 @@
 import jwt
-from fastapi import Depends, APIRouter, Request, Response
+from fastapi import BackgroundTasks, Depends, APIRouter, Request, Response
 from sqlalchemy.orm import Session
 
 from app.cookies import clear_auth_cookies, set_auth_cookies, set_cookie
@@ -14,6 +14,9 @@ from app.security import create_csrf_token, decode_csrf_token, utc_now
 from app.services.user_service import UserService
 from app.services.session_service import SessionService
 from app.settings import REFRESH_COOKIE, CSRF_COOKIE
+from app.schemas.user_schema import ForgotPasswordRequest, ForgotPasswordResponse, ResetPasswordRequest
+from app.repository.password_reset_repository import PasswordResetRepository
+from app.services.password_reset_service import PasswordResetService
 
 
 # Собирает сервис пользователей для текущего запроса.
@@ -22,6 +25,26 @@ def get_user_service(db: Session = Depends(get_db)) -> UserService:
 
 
 router = APIRouter(prefix="/users", tags=["users"])
+
+
+def get_password_reset_service(db: Session = Depends(get_db)) -> PasswordResetService:
+    return PasswordResetService(PasswordResetRepository(db))
+
+
+@router.post("/forgot-password", status_code=202, response_model=ForgotPasswordResponse)
+def forgot_password(data: ForgotPasswordRequest, request: Request, tasks: BackgroundTasks,
+                    service: PasswordResetService = Depends(get_password_reset_service)):
+    service.forgot(data.email, request.client.host if request.client else "unknown", tasks)
+    return ForgotPasswordResponse()
+
+
+@router.post("/reset-password", status_code=204)
+def reset_password(data: ResetPasswordRequest, request: Request, tasks: BackgroundTasks,
+                   service: PasswordResetService = Depends(get_password_reset_service)):
+    service.reset(data.token, data.new_password, request.client.host if request.client else "unknown", tasks)
+    response = Response(status_code=204)
+    clear_auth_cookies(response)
+    return response
 
 
 # Возвращает действующий CSRF-токен, сохраняя его между вкладками.

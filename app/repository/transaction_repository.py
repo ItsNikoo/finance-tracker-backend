@@ -23,6 +23,10 @@ class TransactionRepository:
         self.db.refresh(transaction)
         return transaction
 
+    def delete(self, transaction: Transaction) -> None:
+        self.db.delete(transaction)
+        self.db.commit()
+
     def get_list(self, user_id: int) -> list[Transaction]:
         statement = select(Transaction).where(Transaction.user_id == user_id)
 

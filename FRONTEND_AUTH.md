@@ -1,5 +1,7 @@
 # Подключение frontend к cookie-аутентификации
 
+Восстановление забытого пароля и настройка писем описаны в [PASSWORD_RESET.md](PASSWORD_RESET.md).
+
 ## Локальный запуск
 
 Frontend: `http://localhost:5173`. Backend: `http://localhost:8000`.

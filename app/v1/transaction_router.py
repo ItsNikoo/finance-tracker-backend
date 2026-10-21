@@ -1,4 +1,4 @@
-from fastapi import Depends, APIRouter, Query
+from fastapi import Depends, APIRouter, Query, Response
 from sqlalchemy.orm import Session
 
 from app.database import get_db
@@ -6,7 +6,7 @@ from app.dependencies.auth import get_current_user
 from app.models.user import User
 from app.repository.transaction_repository import TransactionRepository
 from app.repository.category_repository import CategoryRepository
-from app.schemas.transaction_schema import TransactionCreate, TransactionRead, TransactionDateUpdate
+from app.schemas.transaction_schema import TransactionCreate, TransactionRead, TransactionUpdate
 from app.services.transaction_service import TransactionService
 
 
@@ -80,12 +80,22 @@ def create_transaction(
     return service.create_transaction(data, current_user.id)
 
 
-# Изменяет дату совершения транзакции текущего пользователя.
+# Частично обновляет транзакцию текущего пользователя.
 @router.patch("/{transaction_id}", response_model=TransactionRead)
-def update_transaction_date(
+def update_transaction(
         transaction_id: int,
-        data: TransactionDateUpdate,
+        data: TransactionUpdate,
         current_user: User = Depends(get_current_user),
         service: TransactionService = Depends(get_transaction_service)
 ):
-    return service.update_transaction_date(transaction_id, data, current_user.id)
+    return service.update_transaction(transaction_id, data, current_user.id)
+
+
+@router.delete("/{transaction_id}", status_code=204, response_class=Response)
+def delete_transaction(
+        transaction_id: int,
+        current_user: User = Depends(get_current_user),
+        service: TransactionService = Depends(get_transaction_service)
+):
+    service.delete_transaction(transaction_id, current_user.id)
+    return Response(status_code=204)

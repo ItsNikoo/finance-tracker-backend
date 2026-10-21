@@ -6,7 +6,7 @@ from fastapi import HTTPException
 from app.models.transaction import Transaction
 from app.repository.transaction_repository import TransactionRepository
 from app.repository.category_repository import CategoryRepository
-from app.schemas.transaction_schema import TransactionCreate, TransactionDateUpdate
+from app.schemas.transaction_schema import TransactionCreate, TransactionUpdate
 from app.transaction_time import moscow_now
 
 
@@ -26,7 +26,7 @@ class TransactionService:
                 detail="Транзакция дохода должна быть положительной"
             )
 
-        category = self.category_repository.get_by_id(data.category_id)
+        category = self.category_repository.get_by_id(data.category_id, user_id)
         if category is None:
             raise HTTPException(status_code=404, detail="Категория не найдена")
         if category.type != data.type:
@@ -60,13 +60,27 @@ class TransactionService:
 
         return transaction
 
-    # Изменяет дату только у транзакции текущего пользователя.
-    def update_transaction_date(
-        self, transaction_id: int, data: TransactionDateUpdate, user_id: int,
+    # Проверяет итоговую пару категории и типа до изменения полей.
+    def update_transaction(
+        self, transaction_id: int, data: TransactionUpdate, user_id: int,
     ) -> Transaction:
         transaction = self.get_transaction(transaction_id, user_id)
-        transaction.occurred_at = data.occurred_at.replace(tzinfo=None)
+        changes = data.model_dump(exclude_unset=True)
+        if "category_id" in changes or "type" in changes:
+            category = self.category_repository.get_by_id(changes.get("category_id", transaction.category_id), user_id)
+            if category is None:
+                raise HTTPException(status_code=404, detail="Категория не найдена")
+            if category.type != changes.get("type", transaction.type):
+                raise HTTPException(status_code=400, detail="Тип категории не совпадает с типом транзакции")
+        if "occurred_at" in changes:
+            changes["occurred_at"] = changes["occurred_at"].replace(tzinfo=None)
+        for name, value in changes.items():
+            setattr(transaction, name, value)
         return self.repository.save(transaction)
+
+    def delete_transaction(self, transaction_id: int, user_id: int) -> None:
+        transaction = self.get_transaction(transaction_id, user_id)
+        self.repository.delete(transaction)
 
     # Служебная функция. Устанавливает время для выбранного месяца и года.
     def set_time(self, month: int | None, year: int | None):
